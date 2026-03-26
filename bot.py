@@ -1,11 +1,13 @@
 import telebot
 import time
 import threading
+import os
 
-TOKEN = "SENING_TOKENING"
-GROUP_ID = -1001234567890
-ADMIN_ID = 123456789  # o'zingni telegram ID
+TOKEN = os.getenv("TOKEN")
+GROUP_ID = int(os.getenv("GROUP_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
+🔥 8. Done!
 bot = telebot.TeleBot(TOKEN)
 
 FILE = "rules.txt"
