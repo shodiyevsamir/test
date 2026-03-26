@@ -15,31 +15,12 @@ bot = telebot.TeleBot(TOKEN)
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
-# =========================
-# DB TABLES
-# =========================
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS rules (
-    id SERIAL PRIMARY KEY,
-    text TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT,
-    mentions INTEGER DEFAULT 0
-)
-""")
-
+# DB
+cur.execute("CREATE TABLE IF NOT EXISTS rules (id SERIAL PRIMARY KEY, text TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, user_id BIGINT, mentions INTEGER DEFAULT 0)")
 conn.commit()
 
-# =========================
-# DB FUNCS
-# =========================
-
+# DB funcs
 def add_rule(text):
     cur.execute("INSERT INTO rules (text) VALUES (%s)", (text,))
     conn.commit()
@@ -68,91 +49,87 @@ def get_stats():
     cur.execute("SELECT user_id, mentions FROM users ORDER BY mentions DESC")
     return cur.fetchall()
 
-# =========================
 # SETTINGS
-# =========================
-
 interval = 30
 is_running = False
 index = 0
 user_index = 0
 
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+def is_admin(uid):
+    return uid == ADMIN_ID
 
 # =========================
-# ADMIN PANEL
+# INLINE MENU
 # =========================
 
+def admin_menu():
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("➕ Qoida", callback_data="add_rule"))
+    markup.add(types.InlineKeyboardButton("📋 Qoidalar", callback_data="list_rules"))
+    markup.add(types.InlineKeyboardButton("👥 User qo‘sh", callback_data="add_user"))
+    markup.add(types.InlineKeyboardButton("❌ User o‘chir", callback_data="del_user"))
+    markup.add(types.InlineKeyboardButton("📊 Stat", callback_data="stat"))
+    markup.add(types.InlineKeyboardButton("⏱ Interval", callback_data="time"))
+    return markup
+
+# START
 @bot.message_handler(commands=['start'])
 def start(message):
+    if message.chat.type != "private":
+        return
     if not is_admin(message.from_user.id):
         return
 
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("➕ Qoida", "📋 Qoidalar")
-    markup.add("👥 User qo‘sh", "❌ User o‘chir")
-    markup.add("👀 Userlar", "📊 Stat")
-    markup.add("⏱ Interval")
+    bot.send_message(message.chat.id, "⚙️ Admin panel", reply_markup=admin_menu())
 
-    bot.send_message(message.chat.id, "Admin panel", reply_markup=markup)
+# =========================
+# CALLBACK HANDLER
+# =========================
 
-# ➕ qoida
-@bot.message_handler(func=lambda m: m.text == "➕ Qoida")
-def add_rule_btn(message):
-    msg = bot.send_message(message.chat.id, "Qoida yoz:")
-    bot.register_next_step_handler(msg, save_rule)
+@bot.callback_query_handler(func=lambda call: True)
+def callback(call):
+
+    if call.data == "add_rule":
+        msg = bot.send_message(call.message.chat.id, "Qoida yoz:")
+        bot.register_next_step_handler(msg, save_rule)
+
+    elif call.data == "list_rules":
+        rules = get_rules()
+        text = "\n".join([f"{i+1}. {r}" for i, r in enumerate(rules)]) or "Bo‘sh"
+        bot.send_message(call.message.chat.id, text)
+
+    elif call.data == "add_user":
+        msg = bot.send_message(call.message.chat.id, "User ID:")
+        bot.register_next_step_handler(msg, save_user)
+
+    elif call.data == "del_user":
+        msg = bot.send_message(call.message.chat.id, "User ID:")
+        bot.register_next_step_handler(msg, remove_user)
+
+    elif call.data == "stat":
+        data = get_stats()
+        text = "\n".join([f"{u} → {m}" for u, m in data]) or "Bo‘sh"
+        bot.send_message(call.message.chat.id, text)
+
+    elif call.data == "time":
+        msg = bot.send_message(call.message.chat.id, "Sekund:")
+        bot.register_next_step_handler(msg, set_time)
+
+# =========================
+# ACTIONS
+# =========================
 
 def save_rule(message):
     add_rule(message.text)
     bot.send_message(message.chat.id, "✅ Qoida qo‘shildi")
 
-# 📋 rules
-@bot.message_handler(func=lambda m: m.text == "📋 Qoidalar")
-def list_rules(message):
-    rules = get_rules()
-    text = "\n".join([f"{i+1}. {r}" for i, r in enumerate(rules)]) or "Bo‘sh"
-    bot.send_message(message.chat.id, text)
-
-# 👥 add user
-@bot.message_handler(func=lambda m: m.text == "👥 User qo‘sh")
-def add_user_btn(message):
-    msg = bot.send_message(message.chat.id, "User ID yubor:")
-    bot.register_next_step_handler(msg, save_user)
-
 def save_user(message):
     add_user(int(message.text))
     bot.send_message(message.chat.id, "✅ User qo‘shildi")
 
-# ❌ delete user
-@bot.message_handler(func=lambda m: m.text == "❌ User o‘chir")
-def del_user_btn(message):
-    msg = bot.send_message(message.chat.id, "User ID yoz:")
-    bot.register_next_step_handler(msg, remove_user)
-
 def remove_user(message):
     delete_user(int(message.text))
-    bot.send_message(message.chat.id, "🗑 User o‘chirildi")
-
-# 👀 users
-@bot.message_handler(func=lambda m: m.text == "👀 Userlar")
-def list_users(message):
-    users = get_users()
-    text = "\n".join([str(u) for u in users]) or "Bo‘sh"
-    bot.send_message(message.chat.id, text)
-
-# 📊 stats
-@bot.message_handler(func=lambda m: m.text == "📊 Stat")
-def stats(message):
-    data = get_stats()
-    text = "\n".join([f"{u} → {m}" for u, m in data]) or "Bo‘sh"
-    bot.send_message(message.chat.id, text)
-
-# ⏱ interval
-@bot.message_handler(func=lambda m: m.text == "⏱ Interval")
-def ask_time(message):
-    msg = bot.send_message(message.chat.id, "Sekund:")
-    bot.register_next_step_handler(msg, set_time)
+    bot.send_message(message.chat.id, "🗑 O‘chirildi")
 
 def set_time(message):
     global interval
