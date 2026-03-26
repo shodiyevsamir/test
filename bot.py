@@ -1,8 +1,8 @@
-import os
+import telebot
 import time
 import threading
+import os
 import psycopg2
-import telebot
 from telebot import types
 
 TOKEN = os.getenv("TOKEN")
@@ -10,526 +10,199 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+
 conn = psycopg2.connect(DATABASE_URL, sslmode="require")
 conn.autocommit = True
 
-
-def db_execute(query, params=(), fetch=False, fetchone=False):
-    with conn.cursor() as cur:
-        cur.execute(query, params)
-        if fetchone:
-            return cur.fetchone()
+def db(q, p=(), fetch=False):
+    with conn.cursor() as c:
+        c.execute(q, p)
         if fetch:
-            return cur.fetchall()
-    return None
+            return c.fetchall()
 
+# ================= DB =================
 
-# =========================
-# DB INIT
-# =========================
+db("""CREATE TABLE IF NOT EXISTS groups(
+group_id BIGINT PRIMARY KEY,
+title TEXT,
+interval INT DEFAULT 30,
+running BOOLEAN DEFAULT FALSE,
+ri INT DEFAULT 0,
+ui INT DEFAULT 0)""")
 
-db_execute("""
-CREATE TABLE IF NOT EXISTS groups (
-    group_id BIGINT PRIMARY KEY,
-    title TEXT,
-    interval_sec INTEGER NOT NULL DEFAULT 30,
-    is_running BOOLEAN NOT NULL DEFAULT FALSE,
-    rule_index INTEGER NOT NULL DEFAULT 0,
-    user_index INTEGER NOT NULL DEFAULT 0
-)
-""")
+db("""CREATE TABLE IF NOT EXISTS rules(
+id SERIAL PRIMARY KEY,
+group_id BIGINT,
+text TEXT)""")
 
-db_execute("""
-CREATE TABLE IF NOT EXISTS rules (
-    id SERIAL PRIMARY KEY,
-    group_id BIGINT NOT NULL,
-    text TEXT NOT NULL
-)
-""")
+db("""CREATE TABLE IF NOT EXISTS users(
+id SERIAL PRIMARY KEY,
+group_id BIGINT,
+user_id BIGINT,
+name TEXT,
+mentions INT DEFAULT 0,
+UNIQUE(group_id,user_id))""")
 
-db_execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    group_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    name TEXT NOT NULL,
-    mentions INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(group_id, user_id)
-)
-""")
+# ================= HELPERS =================
 
+def is_admin(u): return u == ADMIN_ID
 
-# =========================
-# HELPERS
-# =========================
+def groups(): return db("SELECT * FROM groups", fetch=True) or []
 
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+def ensure(gid, title=""):
+    db("INSERT INTO groups(group_id,title) VALUES(%s,%s) ON CONFLICT DO NOTHING",(gid,title))
 
+def rules(gid): return db("SELECT text FROM rules WHERE group_id=%s",(gid,),True)
 
-def is_private(message) -> bool:
-    return message.chat.type == "private"
+def users(gid): return db("SELECT user_id,name,mentions FROM users WHERE group_id=%s",(gid,),True)
 
+# ================= MENU =================
 
-def ensure_group(group_id: int, title: str = ""):
-    db_execute("""
-        INSERT INTO groups (group_id, title)
-        VALUES (%s, %s)
-        ON CONFLICT (group_id) DO UPDATE
-        SET title = COALESCE(NULLIF(EXCLUDED.title, ''), groups.title)
-    """, (group_id, title))
+def main_menu():
+    m = types.InlineKeyboardMarkup()
+    for g in groups():
+        gid,title,_,run,_,_ = g
+        m.add(types.InlineKeyboardButton(
+            f"{'🟢' if run else '🔴'} {title or gid}",
+            callback_data=f"g:{gid}"
+        ))
+    return m
 
+def panel(gid):
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("➕ Qoida",callback_data=f"ar:{gid}"))
+    m.add(types.InlineKeyboardButton("📋 Qoidalar",callback_data=f"lr:{gid}"))
+    m.add(types.InlineKeyboardButton("👥 User",callback_data=f"au:{gid}"))
+    m.add(types.InlineKeyboardButton("❌ O‘chir",callback_data=f"du:{gid}"))
+    m.add(types.InlineKeyboardButton("👀 Userlar",callback_data=f"lu:{gid}"))
+    m.add(types.InlineKeyboardButton("📊 Stat",callback_data=f"st:{gid}"))
+    m.add(types.InlineKeyboardButton("⏱ Interval",callback_data=f"ti:{gid}"))
+    m.add(types.InlineKeyboardButton("⬅️ Back",callback_data="back"))
+    return m
 
-def get_all_groups():
-    return db_execute("""
-        SELECT group_id, COALESCE(title, ''), interval_sec, is_running, rule_index, user_index
-        FROM groups
-        ORDER BY group_id
-    """, fetch=True) or []
+# ================= START =================
 
+@bot.message_handler(commands=['start'])
+def start(m):
+    if m.chat.type!="private" or not is_admin(m.from_user.id): return
+    bot.send_message(m.chat.id,"Admin panel",reply_markup=main_menu())
 
-def get_group(group_id: int):
-    return db_execute("""
-        SELECT group_id, COALESCE(title, ''), interval_sec, is_running, rule_index, user_index
-        FROM groups
-        WHERE group_id = %s
-    """, (group_id,), fetchone=True)
+# ================= CALLBACK =================
 
+@bot.callback_query_handler(func=lambda c: c.data)
+def cb(c):
+    d = c.data
 
-def get_rules(group_id: int):
-    return db_execute("""
-        SELECT text FROM rules
-        WHERE group_id = %s
-        ORDER BY id
-    """, (group_id,), fetch=True) or []
-
-
-def add_rule(group_id: int, text: str):
-    db_execute("""
-        INSERT INTO rules (group_id, text)
-        VALUES (%s, %s)
-    """, (group_id, text.strip()))
-
-
-def get_users(group_id: int):
-    return db_execute("""
-        SELECT user_id, name, mentions
-        FROM users
-        WHERE group_id = %s
-        ORDER BY id
-    """, (group_id,), fetch=True) or []
-
-
-def add_or_update_user(group_id: int, user_id: int, name: str):
-    db_execute("""
-        INSERT INTO users (group_id, user_id, name)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (group_id, user_id) DO UPDATE
-        SET name = EXCLUDED.name
-    """, (group_id, user_id, name.strip()))
-
-
-def delete_user(group_id: int, user_id: int):
-    db_execute("""
-        DELETE FROM users
-        WHERE group_id = %s AND user_id = %s
-    """, (group_id, user_id))
-
-
-def add_mention(group_id: int, user_id: int):
-    db_execute("""
-        UPDATE users
-        SET mentions = mentions + 1
-        WHERE group_id = %s AND user_id = %s
-    """, (group_id, user_id))
-
-
-def get_stats(group_id: int):
-    return db_execute("""
-        SELECT user_id, name, mentions
-        FROM users
-        WHERE group_id = %s
-        ORDER BY mentions DESC, id ASC
-    """, (group_id,), fetch=True) or []
-
-
-def update_group_interval(group_id: int, seconds: int):
-    db_execute("""
-        UPDATE groups
-        SET interval_sec = %s
-        WHERE group_id = %s
-    """, (seconds, group_id))
-
-
-def update_group_running(group_id: int, is_running: bool):
-    db_execute("""
-        UPDATE groups
-        SET is_running = %s
-        WHERE group_id = %s
-    """, (is_running, group_id))
-
-
-def update_group_indexes(group_id: int, rule_index: int, user_index: int):
-    db_execute("""
-        UPDATE groups
-        SET rule_index = %s, user_index = %s
-        WHERE group_id = %s
-    """, (rule_index, user_index, group_id))
-
-
-def medal(i: int) -> str:
-    if i == 0:
-        return "🥇"
-    if i == 1:
-        return "🥈"
-    if i == 2:
-        return "🥉"
-    return f"{i+1}."
-
-
-def groups_menu():
-    markup = types.InlineKeyboardMarkup()
-    groups = get_all_groups()
-
-    for group_id, title, interval_sec, is_running, _, _ in groups:
-        status = "🟢" if is_running else "🔴"
-        label = title if title else str(group_id)
-        markup.add(
-            types.InlineKeyboardButton(
-                f"{status} {label}",
-                callback_data=f"manage_group:{group_id}"
-            )
-        )
-
-    markup.add(types.InlineKeyboardButton("🔄 Yangilash", callback_data="refresh_groups"))
-    return markup
-
-
-def group_admin_menu(group_id: int):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("➕ Qoida", callback_data=f"add_rule:{group_id}"),
-        types.InlineKeyboardButton("📋 Qoidalar", callback_data=f"list_rules:{group_id}")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👥 User qo‘sh", callback_data=f"add_user:{group_id}"),
-        types.InlineKeyboardButton("❌ User o‘chir", callback_data=f"del_user:{group_id}")
-    )
-    markup.add(
-        types.InlineKeyboardButton("👀 Userlar", callback_data=f"list_users:{group_id}"),
-        types.InlineKeyboardButton("📊 Stat", callback_data=f"stat:{group_id}")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⏱ Interval", callback_data=f"time:{group_id}")
-    )
-    markup.add(
-        types.InlineKeyboardButton("⬅️ Orqaga", callback_data="back_groups")
-    )
-    return markup
-
-
-def group_info_text(group_id: int) -> str:
-    group = get_group(group_id)
-    if not group:
-        return "Guruh topilmadi."
-
-    _, title, interval_sec, is_running, _, _ = group
-    rules_count = len(get_rules(group_id))
-    users_count = len(get_users(group_id))
-    status = "Ishlayapti" if is_running else "To‘xtagan"
-
-    return (
-        f"⚙️ <b>Guruh paneli</b>\n\n"
-        f"<b>Nomi:</b> {title or 'Nomsiz'}\n"
-        f"<b>ID:</b> <code>{group_id}</code>\n"
-        f"<b>Holati:</b> {status}\n"
-        f"<b>Interval:</b> {interval_sec} sekund\n"
-        f"<b>Qoidalar:</b> {rules_count}\n"
-        f"<b>Userlar:</b> {users_count}"
-    )
-
-
-# =========================
-# PRIVATE START
-# =========================
-
-@bot.message_handler(commands=["start"])
-def start_cmd(message):
-    if not is_private(message):
-        return
-    if not is_admin(message.from_user.id):
+    if d=="back":
+        bot.edit_message_text("Admin panel",c.message.chat.id,c.message.id,reply_markup=main_menu())
         return
 
-    bot.send_message(
-        message.chat.id,
-        "⚙️ <b>Admin panel</b>\nPastdan guruh tanlang.",
-        reply_markup=groups_menu()
-    )
-
-
-# =========================
-# GROUP COMMANDS
-# =========================
-
-@bot.message_handler(commands=["startbot"])
-def start_bot(message):
-    if message.chat.type == "private":
+    if d.startswith("g:"):
+        gid=int(d.split(":")[1])
+        ensure(gid)
+        bot.edit_message_text(f"Guruh {gid}",c.message.chat.id,c.message.id,reply_markup=panel(gid))
         return
 
-    ensure_group(message.chat.id, getattr(message.chat, "title", "") or "")
-    update_group_running(message.chat.id, True)
-    bot.reply_to(message, "▶️ Bot ishga tushdi")
+    if ":" not in d: return
+    act,gid=d.split(":")
+    gid=int(gid)
 
+    if act=="ar":
+        msg=bot.send_message(c.message.chat.id,"Qoida:")
+        bot.register_next_step_handler(msg,lambda m:add_rule(m,gid))
 
-@bot.message_handler(commands=["stopbot"])
-def stop_bot(message):
-    if message.chat.type == "private":
-        return
+    elif act=="lr":
+        r=rules(gid)
+        bot.send_message(c.message.chat.id,"\n".join([x[0] for x in r]) or "Bo‘sh")
 
-    ensure_group(message.chat.id, getattr(message.chat, "title", "") or "")
-    update_group_running(message.chat.id, False)
-    bot.reply_to(message, "⏸ Bot to‘xtatildi")
+    elif act=="au":
+        msg=bot.send_message(c.message.chat.id,"Forward yoki ID,Ism yubor")
+        bot.register_next_step_handler(msg,lambda m:add_user(m,gid))
 
+    elif act=="du":
+        msg=bot.send_message(c.message.chat.id,"ID:")
+        bot.register_next_step_handler(msg,lambda m:del_user(m,gid))
 
-# =========================
-# CALLBACKS
-# =========================
+    elif act=="lu":
+        u=users(gid)
+        txt="\n".join([f"{n} ({i})" for i,n,_ in u]) or "Bo‘sh"
+        bot.send_message(c.message.chat.id,txt)
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "Ruxsat yo‘q")
-        return
+    elif act=="st":
+        u=users(gid)
+        u=sorted(u,key=lambda x:-x[2])
+        medals=["🥇","🥈","🥉"]
+        txt="\n".join([f"{medals[i] if i<3 else i+1}. {x[1]} - {x[2]}" for i,x in enumerate(u)]) or "Bo‘sh"
+        bot.send_message(c.message.chat.id,txt)
 
-    data = call.data
+    elif act=="ti":
+        msg=bot.send_message(c.message.chat.id,"Sekund:")
+        bot.register_next_step_handler(msg,lambda m:set_time(m,gid))
 
-    if data == "refresh_groups" or data == "back_groups":
+# ================= ACTIONS =================
+
+def add_rule(m,gid):
+    db("INSERT INTO rules(group_id,text) VALUES(%s,%s)",(gid,m.text))
+    bot.send_message(m.chat.id,"OK")
+
+def add_user(m,gid):
+    if m.forward_from:
+        u=m.forward_from
+        name=(u.first_name or "")+" "+(u.last_name or "")
+        db("INSERT INTO users(group_id,user_id,name) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(gid,u.id,name))
+    else:
         try:
-            bot.edit_message_text(
-                "⚙️ <b>Admin panel</b>\nPastdan guruh tanlang.",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=groups_menu()
-            )
-        except Exception:
-            bot.send_message(
-                call.message.chat.id,
-                "⚙️ <b>Admin panel</b>\nPastdan guruh tanlang.",
-                reply_markup=groups_menu()
-            )
-        bot.answer_callback_query(call.id)
-        return
-
-    if data.startswith("manage_group:"):
-        group_id = int(data.split(":")[1])
-        ensure_group(group_id)
-        try:
-            bot.edit_message_text(
-                group_info_text(group_id),
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=group_admin_menu(group_id)
-            )
-        except Exception:
-            bot.send_message(
-                call.message.chat.id,
-                group_info_text(group_id),
-                reply_markup=group_admin_menu(group_id)
-            )
-        bot.answer_callback_query(call.id)
-        return
-
-    action, group_id_str = data.split(":")
-    group_id = int(group_id_str)
-    ensure_group(group_id)
-
-    if action == "add_rule":
-        msg = bot.send_message(call.message.chat.id, "Qoida yozing:")
-        bot.register_next_step_handler(msg, save_rule_step, group_id)
-
-    elif action == "list_rules":
-        rules = get_rules(group_id)
-        text = "\n".join([f"{i+1}. {r[0]}" for i, r in enumerate(rules)]) if rules else "Bo‘sh"
-        bot.send_message(call.message.chat.id, f"📋 <b>Qoidalar</b>\n\n{text}")
-
-    elif action == "add_user":
-        msg = bot.send_message(
-            call.message.chat.id,
-            "User qo‘shish uchun 3 usul bor:\n\n"
-            "1) Shu yerga <b>ID,Ism</b> yubor\n"
-            "Misol: <code>123456789,Ali</code>\n\n"
-            "2) Guruhdagi user xabarini menga <b>forward</b> qil\n\n"
-            "3) Guruhdagi user xabariga <b>reply</b> qilib menga yubor"
-        )
-        bot.register_next_step_handler(msg, save_user_step, group_id)
-
-    elif action == "del_user":
-        msg = bot.send_message(call.message.chat.id, "O‘chirish uchun user ID yubor:")
-        bot.register_next_step_handler(msg, delete_user_step, group_id)
-
-    elif action == "list_users":
-        users = get_users(group_id)
-        if users:
-            text = "\n".join([
-                f"{i+1}. {name} (<code>{uid}</code>)"
-                for i, (uid, name, _) in enumerate(users)
-            ])
-        else:
-            text = "Bo‘sh"
-        bot.send_message(call.message.chat.id, f"👀 <b>Userlar</b>\n\n{text}")
-
-    elif action == "stat":
-        stats = get_stats(group_id)
-        if stats:
-            lines = []
-            for i, (_, name, mentions) in enumerate(stats):
-                lines.append(f"{medal(i)} {name} — {mentions}")
-            text = "\n".join(lines)
-        else:
-            text = "Bo‘sh"
-        bot.send_message(call.message.chat.id, f"📊 <b>Leaderboard</b>\n\n{text}")
-
-    elif action == "time":
-        msg = bot.send_message(call.message.chat.id, "Yangi intervalni sekundda yubor:")
-        bot.register_next_step_handler(msg, set_time_step, group_id)
-
-    bot.answer_callback_query(call.id)
-
-
-# =========================
-# STEPS
-# =========================
-
-def save_rule_step(message, group_id):
-    if not is_private(message) or not is_admin(message.from_user.id):
-        return
-
-    text = (message.text or "").strip()
-    if not text:
-        bot.send_message(message.chat.id, "Qoida bo‘sh bo‘lmasin.")
-        return
-
-    add_rule(group_id, text)
-    bot.send_message(message.chat.id, "✅ Qoida qo‘shildi")
-
-
-def save_user_step(message, group_id):
-    if not is_private(message) or not is_admin(message.from_user.id):
-        return
-
-    # Variant 1: forward qilingan xabar
-    if getattr(message, "forward_from", None):
-        user = message.forward_from
-        user_id = user.id
-        name = " ".join(filter(None, [user.first_name, user.last_name])) or user.username or str(user.id)
-        add_or_update_user(group_id, user_id, name)
-        bot.send_message(message.chat.id, f"✅ Qo‘shildi: {name} (<code>{user_id}</code>)")
-        return
-
-    # Variant 2: reply qilingan xabar
-    if getattr(message, "reply_to_message", None) and message.reply_to_message.from_user:
-        user = message.reply_to_message.from_user
-        user_id = user.id
-        name = " ".join(filter(None, [user.first_name, user.last_name])) or user.username or str(user.id)
-        add_or_update_user(group_id, user_id, name)
-        bot.send_message(message.chat.id, f"✅ Qo‘shildi: {name} (<code>{user_id}</code>)")
-        return
-
-    # Variant 3: ID,Ism
-    text = (message.text or "").strip()
-    if "," in text:
-        left, right = text.split(",", 1)
-        try:
-            user_id = int(left.strip())
-            name = right.strip()
-            if not name:
-                raise ValueError
-            add_or_update_user(group_id, user_id, name)
-            bot.send_message(message.chat.id, f"✅ Qo‘shildi: {name} (<code>{user_id}</code>)")
+            i,n=m.text.split(",")
+            db("INSERT INTO users(group_id,user_id,name) VALUES(%s,%s,%s)",(gid,int(i),n))
+        except:
+            bot.send_message(m.chat.id,"Format xato")
             return
-        except Exception:
-            pass
+    bot.send_message(m.chat.id,"OK")
 
-    bot.send_message(
-        message.chat.id,
-        "❌ Noto‘g‘ri format.\n"
-        "To‘g‘ri misol: <code>123456789,Ali</code>\n"
-        "Yoki user xabarini forward/reply qiling."
-    )
+def del_user(m,gid):
+    db("DELETE FROM users WHERE group_id=%s AND user_id=%s",(gid,int(m.text)))
+    bot.send_message(m.chat.id,"OK")
 
+def set_time(m,gid):
+    db("UPDATE groups SET interval=%s WHERE group_id=%s",(int(m.text),gid))
+    bot.send_message(m.chat.id,"OK")
 
-def delete_user_step(message, group_id):
-    if not is_private(message) or not is_admin(message.from_user.id):
-        return
+# ================= GROUP =================
 
-    try:
-        user_id = int((message.text or "").strip())
-    except Exception:
-        bot.send_message(message.chat.id, "❌ User ID noto‘g‘ri")
-        return
+@bot.message_handler(commands=['startbot'])
+def startb(m):
+    if m.chat.type=="private": return
+    ensure(m.chat.id,m.chat.title)
+    db("UPDATE groups SET running=TRUE WHERE group_id=%s",(m.chat.id,))
+    bot.reply_to(m,"ON")
 
-    delete_user(group_id, user_id)
-    bot.send_message(message.chat.id, "🗑 User o‘chirildi")
+@bot.message_handler(commands=['stopbot'])
+def stopb(m):
+    if m.chat.type=="private": return
+    db("UPDATE groups SET running=FALSE WHERE group_id=%s",(m.chat.id,))
+    bot.reply_to(m,"OFF")
 
+# ================= LOOP =================
 
-def set_time_step(message, group_id):
-    if not is_private(message) or not is_admin(message.from_user.id):
-        return
-
-    try:
-        sec = int((message.text or "").strip())
-        if sec < 5:
-            bot.send_message(message.chat.id, "❌ Minimum 5 sekund qo‘ying")
-            return
-    except Exception:
-        bot.send_message(message.chat.id, "❌ Raqam yuboring")
-        return
-
-    update_group_interval(group_id, sec)
-    bot.send_message(message.chat.id, f"⏱ Interval {sec} sekund bo‘ldi")
-
-
-# =========================
-# AUTO SEND LOOP
-# =========================
-
-def auto_send_loop():
+def loop():
     while True:
-        try:
-            groups = get_all_groups()
+        for g in groups():
+            gid,_,t,r,ri,ui=g
+            if not r: continue
+            rs=rules(gid)
+            us=users(gid)
+            if not rs or not us: continue
 
-            for group_id, title, interval_sec, is_running, rule_index, user_index in groups:
-                if not is_running:
-                    continue
+            ri%=len(rs)
+            ui%=len(us)
 
-                rules = get_rules(group_id)
-                users = get_users(group_id)
+            uid,name,_=us[ui]
+            bot.send_message(gid,f'<a href="tg://user?id={uid}">{name}</a>\n{rs[ri][0]}')
 
-                if not rules or not users:
-                    continue
+            db("UPDATE users SET mentions=mentions+1 WHERE user_id=%s AND group_id=%s",(uid,gid))
+            db("UPDATE groups SET ri=%s,ui=%s WHERE group_id=%s",((ri+1)%len(rs),(ui+1)%len(us),gid))
 
-                r_idx = rule_index % len(rules)
-                u_idx = user_index % len(users)
+        time.sleep(5)
 
-                rule_text = rules[r_idx][0]
-                user_id, name, _mentions = users[u_idx]
-
-                text = f'<a href="tg://user?id={user_id}">{name}</a>\n{rule_text}'
-                bot.send_message(group_id, text, parse_mode="HTML")
-
-                add_mention(group_id, user_id)
-                update_group_indexes(
-                    group_id,
-                    (r_idx + 1) % len(rules),
-                    (u_idx + 1) % len(users)
-                )
-
-            time.sleep(5)
-
-        except Exception as e:
-            print(f"AUTO_SEND_ERROR: {e}")
-            time.sleep(5)
-
-
-threading.Thread(target=auto_send_loop, daemon=True).start()
+threading.Thread(target=loop,daemon=True).start()
 bot.infinity_polling(skip_pending=True)
