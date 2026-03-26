@@ -7,7 +7,9 @@ TOKEN = os.getenv("TOKEN")
 GROUP_ID = int(os.getenv("GROUP_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-🔥 8. Done!
+bot = telebot.TeleBot(TOKEN)
+
+#🔥 8. Done!
 bot = telebot.TeleBot(TOKEN)
 
 FILE = "rules.txt"
