@@ -85,65 +85,83 @@ def panel(gid):
 @bot.message_handler(commands=['start'])
 def start(m):
     if m.chat.type!="private" or not is_admin(m.from_user.id): return
-    bot.send_message(m.chat.id,"Admin panel",reply_markup=main_menu())
+    bot.send_message(m.chat.id,"⚙️ Admin panel",reply_markup=main_menu())
 
-# ================= CALLBACK =================
+# ================= CALLBACK (FIXED) =================
 
-@bot.callback_query_handler(func=lambda c: c.data)
-def cb(c):
-    d = c.data
-
-    if d=="back":
-        bot.edit_message_text("Admin panel",c.message.chat.id,c.message.id,reply_markup=main_menu())
+@bot.callback_query_handler(func=lambda call: True)
+def cb(call):
+    try:
+        data = call.data
+    except:
         return
 
-    if d.startswith("g:"):
-        gid=int(d.split(":")[1])
+    if data == "back":
+        try:
+            bot.edit_message_text("⚙️ Admin panel",call.message.chat.id,call.message.id,reply_markup=main_menu())
+        except:
+            bot.send_message(call.message.chat.id,"⚙️ Admin panel",reply_markup=main_menu())
+
+        bot.answer_callback_query(call.id)
+        return
+
+    if data.startswith("g:"):
+        gid=int(data.split(":")[1])
         ensure(gid)
-        bot.edit_message_text(f"Guruh {gid}",c.message.chat.id,c.message.id,reply_markup=panel(gid))
+        try:
+            bot.edit_message_text(f"Guruh {gid}",call.message.chat.id,call.message.id,reply_markup=panel(gid))
+        except:
+            bot.send_message(call.message.chat.id,f"Guruh {gid}",reply_markup=panel(gid))
+
+        bot.answer_callback_query(call.id)
         return
 
-    if ":" not in d: return
-    act,gid=d.split(":")
+    if ":" not in data:
+        bot.answer_callback_query(call.id)
+        return
+
+    act,gid=data.split(":")
     gid=int(gid)
 
     if act=="ar":
-        msg=bot.send_message(c.message.chat.id,"Qoida:")
+        msg=bot.send_message(call.message.chat.id,"Qoida yoz:")
         bot.register_next_step_handler(msg,lambda m:add_rule(m,gid))
 
     elif act=="lr":
         r=rules(gid)
-        bot.send_message(c.message.chat.id,"\n".join([x[0] for x in r]) or "Bo‘sh")
+        bot.send_message(call.message.chat.id,"\n".join([x[0] for x in r]) or "Bo‘sh")
 
     elif act=="au":
-        msg=bot.send_message(c.message.chat.id,"Forward yoki ID,Ism yubor")
+        msg=bot.send_message(call.message.chat.id,"Forward yoki ID,Ism")
         bot.register_next_step_handler(msg,lambda m:add_user(m,gid))
 
     elif act=="du":
-        msg=bot.send_message(c.message.chat.id,"ID:")
+        msg=bot.send_message(call.message.chat.id,"User ID:")
         bot.register_next_step_handler(msg,lambda m:del_user(m,gid))
 
     elif act=="lu":
         u=users(gid)
         txt="\n".join([f"{n} ({i})" for i,n,_ in u]) or "Bo‘sh"
-        bot.send_message(c.message.chat.id,txt)
+        bot.send_message(call.message.chat.id,txt)
 
     elif act=="st":
         u=users(gid)
         u=sorted(u,key=lambda x:-x[2])
         medals=["🥇","🥈","🥉"]
         txt="\n".join([f"{medals[i] if i<3 else i+1}. {x[1]} - {x[2]}" for i,x in enumerate(u)]) or "Bo‘sh"
-        bot.send_message(c.message.chat.id,txt)
+        bot.send_message(call.message.chat.id,txt)
 
     elif act=="ti":
-        msg=bot.send_message(c.message.chat.id,"Sekund:")
+        msg=bot.send_message(call.message.chat.id,"Sekund:")
         bot.register_next_step_handler(msg,lambda m:set_time(m,gid))
+
+    bot.answer_callback_query(call.id)
 
 # ================= ACTIONS =================
 
 def add_rule(m,gid):
     db("INSERT INTO rules(group_id,text) VALUES(%s,%s)",(gid,m.text))
-    bot.send_message(m.chat.id,"OK")
+    bot.send_message(m.chat.id,"✅ Qo‘shildi")
 
 def add_user(m,gid):
     if m.forward_from:
@@ -155,17 +173,17 @@ def add_user(m,gid):
             i,n=m.text.split(",")
             db("INSERT INTO users(group_id,user_id,name) VALUES(%s,%s,%s)",(gid,int(i),n))
         except:
-            bot.send_message(m.chat.id,"Format xato")
+            bot.send_message(m.chat.id,"❌ Format xato")
             return
-    bot.send_message(m.chat.id,"OK")
+    bot.send_message(m.chat.id,"✅ OK")
 
 def del_user(m,gid):
     db("DELETE FROM users WHERE group_id=%s AND user_id=%s",(gid,int(m.text)))
-    bot.send_message(m.chat.id,"OK")
+    bot.send_message(m.chat.id,"🗑 OK")
 
 def set_time(m,gid):
     db("UPDATE groups SET interval=%s WHERE group_id=%s",(int(m.text),gid))
-    bot.send_message(m.chat.id,"OK")
+    bot.send_message(m.chat.id,"⏱ OK")
 
 # ================= GROUP =================
 
@@ -174,35 +192,41 @@ def startb(m):
     if m.chat.type=="private": return
     ensure(m.chat.id,m.chat.title)
     db("UPDATE groups SET running=TRUE WHERE group_id=%s",(m.chat.id,))
-    bot.reply_to(m,"ON")
+    bot.reply_to(m,"▶️ ON")
 
 @bot.message_handler(commands=['stopbot'])
 def stopb(m):
     if m.chat.type=="private": return
     db("UPDATE groups SET running=FALSE WHERE group_id=%s",(m.chat.id,))
-    bot.reply_to(m,"OFF")
+    bot.reply_to(m,"⏸ OFF")
 
 # ================= LOOP =================
 
 def loop():
     while True:
-        for g in groups():
-            gid,_,t,r,ri,ui=g
-            if not r: continue
-            rs=rules(gid)
-            us=users(gid)
-            if not rs or not us: continue
+        try:
+            for g in groups():
+                gid,_,t,r,ri,ui=g
+                if not r: continue
 
-            ri%=len(rs)
-            ui%=len(us)
+                rs=rules(gid)
+                us=users(gid)
+                if not rs or not us: continue
 
-            uid,name,_=us[ui]
-            bot.send_message(gid,f'<a href="tg://user?id={uid}">{name}</a>\n{rs[ri][0]}')
+                ri%=len(rs)
+                ui%=len(us)
 
-            db("UPDATE users SET mentions=mentions+1 WHERE user_id=%s AND group_id=%s",(uid,gid))
-            db("UPDATE groups SET ri=%s,ui=%s WHERE group_id=%s",((ri+1)%len(rs),(ui+1)%len(us),gid))
+                uid,name,_=us[ui]
+                bot.send_message(gid,f'<a href="tg://user?id={uid}">{name}</a>\n{rs[ri][0]}')
 
-        time.sleep(5)
+                db("UPDATE users SET mentions=mentions+1 WHERE user_id=%s AND group_id=%s",(uid,gid))
+                db("UPDATE groups SET ri=%s,ui=%s WHERE group_id=%s",((ri+1)%len(rs),(ui+1)%len(us),gid))
+
+            time.sleep(5)
+
+        except Exception as e:
+            print("ERROR:",e)
+            time.sleep(5)
 
 threading.Thread(target=loop,daemon=True).start()
 bot.infinity_polling(skip_pending=True)
